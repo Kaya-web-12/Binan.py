@@ -1,0 +1,120 @@
+import websocket
+import json
+import requests
+
+# إعدادات بوت تلجرام
+TELEGRAM_TOKEN = 'YOUR_TELEGRAM_TOKEN'
+CHAT_ID = 'YOUR_CHAT_ID'
+
+def send_telegram_message(message):
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    payload = {
+        'chat_id': CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown'
+    }
+    requests.post(url, json=payload)
+
+# تخزين الأسعار القديمة لكل عملة
+old_prices = {}
+
+def get_liquidity(symbol):
+    """جلب السيولة المتوفرة للعملة"""
+    url = f'https://api.binance.com/api/v3/ticker/bookTicker?symbol={symbol}'
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        return data.get('bidQty', 'N/A')  # الحصول على كمية الطلبات الأكثر (bid quantity) كسيولة
+    return 'N/A'
+
+def on_message(ws, message):
+    try:
+        print(f"Received message: {message}")  # طباعة الرسالة المستلمة
+        item = json.loads(message)  # تحليل البيانات المستلمة
+        
+        # استخراج المعلومات من الرسالة
+        symbol = item['s']  # رمز العملة
+        new_price = float(item['p'])  # سعر الصفقة الحالي
+
+        if symbol not in old_prices:
+            old_prices[symbol] = new_price  # تخزين السعر كـ سعر قديم
+            return  # لا نقوم بأي شيء إذا كانت هذه هي الرسالة الأولى
+
+        old_price = old_prices[symbol]
+        change_percentage = ((new_price - old_price) / old_price) * 100
+
+        # تحديد عدد الرموز بناءً على النسبة المئوية
+        alert_symbol = ''
+        if change_percentage >= 10:
+            alert_symbol = '⏫'
+        elif change_percentage >= 6:
+            alert_symbol = 'Ⓜ️'
+        elif change_percentage >= 5:
+            alert_symbol = '🚨'
+        elif change_percentage >= 4:
+            alert_symbol = '🟣'
+        elif change_percentage >= 3:
+            alert_symbol = '💥'
+        elif change_percentage >= 2:
+            alert_symbol = '🟢'
+        elif change_percentage >= 1:
+            alert_symbol = '🟡'
+        
+        # حساب المراحل
+        stage_count = 0
+        if change_percentage >= 1:
+            stage_count = min(3, int((change_percentage - 1) // 0.2))
+
+        # جلب السيولة للعملة
+        liquidity = get_liquidity(symbol)
+
+        if stage_count > 0 or alert_symbol:  # إرسال التنبيه فقط إذا كانت هناك حركة
+            # إعداد الرسالة
+            message_template = f"-  #{symbol} ({stage_count + 1}) {alert_symbol * (stage_count + 1)} - 24h\n"
+            message_template += "—————————————————\n"
+            message_template += f"- 💰 Old Price: {old_price:.6f}\n"
+            message_template += f"- 💰 New Price: {new_price:.6f}\n"
+            message_template += f"- 🔄 Change: {change_percentage:.2f}%\n"
+            message_template += f"- 💱 Liquidity : {liquidity}\n"
+            
+            if change_percentage >= 1:  # تخصيص الشرط حسب الحاجة
+                message_template += "-  PUMP DETECT\n"
+
+            print(message_template)
+            send_telegram_message(message_template)  # إرسال التنبيه إلى تلجرام
+
+        # تحديث السعر القديم
+        old_prices[symbol] = new_price
+    except Exception as e:
+        print(f"Error parsing message: {e}")
+
+def on_error(ws, error):
+    print(f"Error: {error}")
+
+def on_close(ws, close_status_code, close_msg):
+    print("Connection closed")
+
+def on_open(ws):
+    print("Connection opened")
+
+def start_websocket(symbol):
+    websocket_url = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
+    ws = websocket.WebSocketApp(websocket_url,
+                                on_message=on_message,
+                                on_error=on_error,
+                                on_close=on_close)
+    ws.on_open = on_open
+    ws.run_forever()
+
+def main():
+    # جلب قائمة الأزواج المتاحة
+    response = requests.get('https://api.binance.com/api/v3/exchangeInfo')
+    if response.status_code == 200:
+        symbols = response.json()['symbols']
+        for symbol_info in symbols:
+            symbol = symbol_info['symbol']
+            # بدء WebSocket لكل زوج عملة
+            start_websocket(symbol)  # بدء مراقبة الأسعار لكل زوج عملة
+
+if __name__ == "__main__":
+    main()
